@@ -61,6 +61,15 @@ class TestExamples(unittest.TestCase):
         self.output_file_list = [f"wingNew-{input_type}.plt"]
         self.common_test("deform_geometry", "runScript.py", args=["--input_type", input_type])
 
+    def test_ship_hull(self):
+        self.output_file_list = [
+            "KCS_original.dat",
+            "KCS_deformed.plt",
+            "KCS_deformed.igs",
+            "KCS_ffd_embedded.dat",
+        ]
+        self.common_test("ship_hull", "runShipFFD.py")
+
     def tearDown(self):
         try:
             for f in self.output_file_list:
