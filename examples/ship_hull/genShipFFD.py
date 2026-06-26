@@ -1,47 +1,87 @@
 """
-Generate a free-form deformation (FFD) control box for the KCS container-ship
-half-hull (``KCS_hull_SVA.igs``).
+Generate an FFD control box for the KCS container-ship half-hull
+(``KCS_hull_SVA.igs``).
 
-The hull is a half model: the centreline symmetry plane is at y=0, x runs
-longitudinally (stern -> bow) and z is vertical (keel -> deck). The bounding box
-of the IGES control points (full-scale metres) is roughly::
+The symmetry plane is at y=0, x runs longitudinally (stern -> bow) and z is
+vertical (keel -> deck).
 
-    x: [ -6.0, 237.8 ]   (length, ~Lpp 230 m plus bow/stern overhang)
-    y: [  0.0,  16.15]   (half-beam; KCS B = 32.2 m -> half = 16.1 m)
-    z: [  0.0,  23.5 ]   (keel to deck)
+Two constructions are available, selected by ``BODY_FITTED``:
 
-We wrap this in a single rectangular FFD volume with a margin on every face,
-clustering the longitudinal control sections toward the bow and stern (where the
-hull shape changes most) with a cosine distribution.
+* Body-fitted (default): at every longitudinal station the outer transverse face
+  hugs the hull's local half-beam ``y(x, z)`` and the keel/deck levels follow the
+  hull, so the box tapers naturally toward the bow and stern. This places each
+  control point close to the surface it influences, giving much tighter local
+  shape control. The shape is measured by ray casting: the hull IGES is
+  triangulated and inward ``-y`` rays are cast from outboard, keeping the
+  outermost skin intersection (:func:`pygeo.geo_utils.createFittedHullFFD`).
 
-The inner transverse face is placed exactly at y=0 so it coincides with the
-centreline symmetry plane. With this layout the j=0 control-point plane governs
-the centreline; leaving it fixed during optimization keeps the hull symmetric.
+* Rectangular box: a single axis-aligned volume sized to the hull bounding box
+  plus a margin on every face, with the longitudinal sections cosine-clustered
+  toward the bow and stern.
 
-Run this once to (re)generate ``KCS_ffd.xyz``; ``runShipFFD.py`` reads that file.
+Either way the ``j=0`` control plane is pinned on the y=0 centreline to preserve
+port/starboard symmetry, and the FFD index convention is i -> longitudinal,
+j -> transverse (y, j=0 on the centreline), k -> vertical (z), matching what
+``runShipFFD.py`` expects.
+
+Run this once to (re)generate ``KCS_ffd.xyz``.
 """
 
 # External modules
 import numpy as np
 
 # First party modules
-from pygeo.geo_utils import write_wing_FFD_file
+from pygeo import pyGeo
+from pygeo.geo_utils import createFittedHullFFD, write_wing_FFD_file
 
-# FFD box extents: hull bounding box plus margins (full-scale metres).
-# The inner transverse face sits exactly on the centreline plane (y=0).
-X_MIN, X_MAX = -9.0, 240.0  # longitudinal (stern -> bow)
-Y_MIN, Y_MAX = 0.0, 17.0  # transverse (centreline -> outboard of max beam)
-Z_MIN, Z_MAX = -0.5, 24.0  # vertical (below keel -> above deck)
+IGES_FILE = "KCS_hull_SVA.igs"
+
+# Switch between the body-fitted FFD (True) and the simple rectangular box (False).
+BODY_FITTED = True
 
 # Number of control points in each FFD direction.
 # i -> longitudinal, j -> transverse (y), k -> vertical (z).
-N_LONGITUDINAL = 18
-N_TRANSVERSE = 4
-N_VERTICAL = 5
+N_LONGITUDINAL = 22
+N_TRANSVERSE = 6
+N_VERTICAL = 8
+
+# --- Body-fitted parameters ------------------------------------------------- #
+# Margins that grow the FFD outward so it fully encloses the hull, given as
+# [longitudinal, transverse, vertical]. Absolute margins are in metres; relative
+# margins are fractions of hull length, local half-beam, and hull depth. The
+# transverse inner face stays on the y=0 centreline regardless of these.
+ABS_MARGINS = [1.0, 5.0, 2.0]
+REL_MARGINS = [0.01, 0.1, 0.1]
+
+# --- Rectangular-box parameters --------------------------------------------- #
+# FFD box extents: hull bounding box plus margins (full-scale metres).
+# The inner transverse face sits exactly on the centreline plane (y=0).
+X_MIN, X_MAX = -9.0, 240.0  # longitudinal (stern -> bow)
+Y_MIN, Y_MAX = -0.01, 17.0  # transverse (centreline -> outboard of max beam)
+Z_MIN, Z_MAX = -0.5, 24.0  # vertical (below keel -> above deck)
 
 
-def generate(fileName="KCS_ffd.xyz"):
-    """Write the KCS hull FFD box to ``fileName`` in PLOT3D format."""
+def generate_body_fitted(fileName):
+    """Write a body-fitted FFD that conforms to the hull surface."""
+    geo = pyGeo(fileName=IGES_FILE, initType="iges")
+    geo.doConnectivity()
+
+    createFittedHullFFD(
+        geo,
+        "point-vector",
+        fileName,
+        nLongitudinal=N_LONGITUDINAL,
+        nTransverse=N_TRANSVERSE,
+        nVertical=N_VERTICAL,
+        absMargins=ABS_MARGINS,
+        relMargins=REL_MARGINS,
+        xDist="cosine",
+    )
+
+
+def generate_box(fileName):
+    """Write a simple rectangular FFD box around the hull bounding box."""
+
     # write_wing_FFD_file builds the box from two end "slices" (stern and bow),
     # each holding the four cross-section corners. The slice array is indexed
     # [slice, a, b, xyz] where a selects the transverse (y) corner and b the
@@ -75,7 +115,19 @@ def generate(fileName="KCS_ffd.xyz"):
         axes=axes,
         dist=dist,
     )
-    print(f"Wrote {fileName}: {N_LONGITUDINAL} x {N_TRANSVERSE} x {N_VERTICAL} FFD control points")
+
+
+def generate(fileName="KCS_ffd.xyz"):
+    """Write the KCS hull FFD box to ``fileName`` in PLOT3D format."""
+    if BODY_FITTED:
+        generate_body_fitted(fileName)
+        kind = "body-fitted"
+    else:
+        generate_box(fileName)
+        kind = "rectangular-box"
+    print(
+        f"Wrote {fileName}: {N_LONGITUDINAL} x {N_TRANSVERSE} x {N_VERTICAL} {kind} FFD control points"
+    )
 
 
 if __name__ == "__main__":

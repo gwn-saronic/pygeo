@@ -1,27 +1,6 @@
 """
-Deform the KCS container-ship half-hull with a free-form deformation (FFD).
-
-This example embeds the IGES hull (``KCS_hull_SVA.igs``) in the FFD box produced
-by ``genShipFFD.py`` and applies a *local* shape change: a
-bulbous-bow-style bulge that fattens the forward sections by pushing the bow
-control points outboard (in the transverse +y direction).
-
-The hull is a half model with the centreline at y=0. The FFD's j=0 control
-plane lies on that centreline, so we leave it untouched and only move the
-outboard (j >= 1) control points. This keeps the centreline exactly on y=0 and
-preserves port/starboard symmetry.
-
-Outputs (PLOT3D / Tecplot / IGES):
-    KCS_original.dat       undeformed hull surface (for comparison)
-    KCS_deformed.plt       deformed hull surface
-    KCS_deformed.igs       deformed hull as CAD (IGES)
-    KCS_ffd_embedded.dat   FFD control box with the embedded hull
-
-Run ``genShipFFD.py`` first to create ``KCS_ffd.xyz``.
-
-Note: export prints a few sub-centimetre "not projected to tolerance" warnings.
-These are CAD points with a tiny negative y (numerical noise on the centreline)
-being snapped onto the y=0 symmetry plane, and are harmless.
+Embed the IGES hull (``KCS_hull_SVA.igs``) in the FFD box produced
+by ``genShipFFD.py`` and applies *local* shape change
 """
 
 # External modules
@@ -37,7 +16,9 @@ FFD_FILE = "KCS_ffd.xyz"
 # We select forward control points at/below the waterline and push them outboard.
 BOW_X_MIN = 215.0  # only stations forward of this (forward ~10% of Lpp)
 WATERLINE_Z_MAX = 12.0  # only control points at/below the design waterline
-BULGE_OUTBOARD = 2.0  # transverse (+y) offset applied to the selected points [m]
+BULGE_OUTBOARD = 0.5  # transverse (+y) offset applied to the selected points [m]
+
+STERN_X_MAX = 240.0 * 0.2 # only stations aft of this
 
 # Surface refinement (knots inserted per direction before export). Higher values
 # give smoother output surfaces at the cost of speed.
@@ -67,31 +48,73 @@ def main():
     coef = DVGeo.FFD.coef
 
     isForward = coef[:, 0] >= BOW_X_MIN
+    isAft = coef[:, 0] <= STERN_X_MAX
     isBelowWaterline = coef[:, 2] <= WATERLINE_Z_MAX
-    selected = isForward & isBelowWaterline
+    bowSelectedFFDs = isForward & isBelowWaterline
+    sternFFDs = isAft & isBelowWaterline
 
     # Never move the centreline (j=0) plane, so the symmetry plane stays at y=0.
-    centrelinePlane = localIndex[:, 0, :].flatten()
-    selected[centrelinePlane] = False
+    CLFFDs = localIndex[:, 0, :].flatten()
+    bowSelectedFFDs[CLFFDs] = False
+    sternFFDs[CLFFDs] = False
 
-    print(f"Bulging {selected.sum()} bow control points outboard by {BULGE_OUTBOARD} m")
+    print(f"Bulging {bowSelectedFFDs.sum()} bow control points outboard by {BULGE_OUTBOARD} m")
 
     # ----------------------- Apply the deformation ------------------------ #
+    iframe = 0
     shape = DVGeo.getValues()["localShape"].copy()
-    shape[selected] += BULGE_OUTBOARD
     DVGeo.setDesignVars({"localShape": shape})
+    nframes = 10
+    wave = BULGE_OUTBOARD * np.cos(np.linspace(0, np.pi, nframes))
 
-    # ----------------------- Write the outputs ---------------------------- #
-    # updatePyGeo embeds each surface's control points, deforms them through the
-    # FFD, and writes the result. Writing both formats from the same object is
-    # safe (the second call reproduces the first to ~1e-13).
-    DVGeo.updatePyGeo(geo, "tecplot", "KCS_deformed", nRefU=N_REFINE, nRefV=N_REFINE)
-    DVGeo.updatePyGeo(geo, "iges", "KCS_deformed", nRefU=N_REFINE, nRefV=N_REFINE)
+    # --- Bow deformation ---
+    print("="*30)
+    print("Bow deformation")
+    print("="*30)
+    for ii, bump in enumerate(wave):
+        print(f"bump: {bump}")
+        # breakpoint()
+        shape[bowSelectedFFDs] += bump
+        DVGeo.setDesignVars({"localShape": shape})
 
-    # Dump the FFD control box together with the embedded (deformed) hull.
-    DVGeo.writeTecplot("KCS_ffd_embedded.dat")
+        # ----------------------- Write the outputs ---------------------------- #
+        # updatePyGeo embeds each surface's control points, deforms them through the
+        # FFD, and writes the result. Writing both formats from the same object is
+        # safe (the second call reproduces the first to ~1e-13).
+        DVGeo.updatePyGeo(geo, "tecplot", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
+        DVGeo.updatePyGeo(geo, "iges", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
 
-    print("Wrote KCS_original.dat, KCS_deformed.plt, KCS_deformed.igs, KCS_ffd_embedded.dat")
+        # Dump the FFD control box together with the embedded (deformed) hull.
+        DVGeo.writeTecplot(f"KCS_ffd_embedded_{iframe}.dat")
+
+        # Reset DVs
+        shape[bowSelectedFFDs] -= bump
+        DVGeo.setDesignVars({"localShape": shape})
+        iframe += 1
+
+    # --- Stern def ---
+    print("="*30)
+    print("Stern deformation")
+    print("="*30)
+    for ii, bump in enumerate(wave):
+        print(f"bump: {bump}")
+        shape[sternFFDs] += bump
+        DVGeo.setDesignVars({"localShape": shape})
+
+        # ----------------------- Write the outputs ---------------------------- #
+        # updatePyGeo embeds each surface's control points, deforms them through the
+        # FFD, and writes the result. Writing both formats from the same object is
+        # safe (the second call reproduces the first to ~1e-13).
+        DVGeo.updatePyGeo(geo, "tecplot", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
+        DVGeo.updatePyGeo(geo, "iges", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
+
+        # Dump the FFD control box together with the embedded (deformed) hull.
+        DVGeo.writeTecplot(f"KCS_ffd_embedded_{iframe}.dat")
+
+        # Reset DVs
+        shape[sternFFDs] -= bump
+        DVGeo.setDesignVars({"localShape": shape})
+        iframe += 1
 
 
 if __name__ == "__main__":
