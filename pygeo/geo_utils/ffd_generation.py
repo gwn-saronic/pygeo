@@ -319,7 +319,7 @@ def createFittedHullFFD(
     using :func:`pygeo.geo_utils.projection.projectNodePosOnly`. At each
     station, the set of vertical levels that hit the hull defines
     the local keel and deck, and the intersection ``y`` values define the local
-    half-beam profile. The ``j=0`` control plane is pinned to the ``y=0``
+    half-beam profile. The ``j=0`` control plane is pinned to the ``y=0.0 - absMargins[1]``
     symmetry plane so port/starboard symmetry is preserved, and every face is
     expanded by a margin so the FFD fully encloses the hull.
 
@@ -467,7 +467,7 @@ def createFittedHullFFD(
         for kk in range(nVertical):
             yLocal = np.interp(zLevels[kk], zHit, yHit)
             yOuter = yLocal + absMargins[1] + relMargins[1] * yLocal
-            yCtl = np.linspace(0.0, yOuter, nTransverse)
+            yCtl = np.linspace(0-absMargins[1], yOuter, nTransverse)
             for jj in range(nTransverse):
                 FFDCoords[ii, jj, kk] = [xNodes[ii], yCtl[jj], zLevels[kk]]
 

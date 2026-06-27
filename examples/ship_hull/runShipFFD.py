@@ -8,6 +8,7 @@ import numpy as np
 
 # First party modules
 from pygeo import DVGeometry, pyGeo
+from pyspline.utils import openTecplot, closeTecplot, writeTecplot3D
 
 IGES_FILE = "KCS_hull_SVA.igs"
 FFD_FILE = "KCS_ffd.xyz"
@@ -16,13 +17,50 @@ FFD_FILE = "KCS_ffd.xyz"
 # We select forward control points at/below the waterline and push them outboard.
 BOW_X_MIN = 215.0  # only stations forward of this (forward ~10% of Lpp)
 WATERLINE_Z_MAX = 12.0  # only control points at/below the design waterline
-BULGE_OUTBOARD = 0.5  # transverse (+y) offset applied to the selected points [m]
+BULGE_OUTBOARD = 0.8  # transverse (+y) offset applied to the selected points [m]
 
 STERN_X_MAX = 240.0 * 0.2 # only stations aft of this
 
-# Surface refinement (knots inserted per direction before export). Higher values
-# give smoother output surfaces at the cost of speed.
-N_REFINE = 4
+# Point-cloud sampling resolution per surface (parametric u x v grid). Higher
+# values capture more hull curvature at the cost of larger output files.
+NU_SAMPLE = 40
+NV_SAMPLE = 40
+
+
+def sampleHullPointCloud(geo, nu=NU_SAMPLE, nv=NV_SAMPLE):
+    """Sample the baseline (undeformed) hull on an nu x nv parametric grid.
+
+    Evaluates each surface's NURBS definition once and stacks all surface points
+    into a single ``(nSurf*nu*nv, 3)`` array. This is the only place the
+    expensive NURBS evaluation (``getValue``) happens; the returned cloud is
+    embedded in the FFD and thereafter deformed directly by ``DVGeo.update``.
+    """
+    u, v = np.meshgrid(np.linspace(0, 1, nu), np.linspace(0, 1, nv))
+    u, v = u.flatten(), v.flatten()
+    allPts = [geo.surfs[ii].getValue(u, v) for ii in range(geo.nSurf)]  # each (nu*nv, 3)
+    return np.vstack(allPts)
+
+
+def writeDeformedHull(DVGeo, fileName, nSurf, nu=NU_SAMPLE, nv=NV_SAMPLE, ptName="hull", iframe=0):
+    """Deform the embedded hull cloud with the current design variables and write
+    it as a structured Tecplot surface (one zone per hull surface).
+
+    ``DVGeo.update`` returns the baseline cloud deformed by the current DVs in the
+    order it was embedded: surface-major, then the v-major ``u x v`` grid from
+    ``sampleHullPointCloud``. Each surface block therefore reshapes back to an
+    ``(nv, nu)`` structured patch, which ``writeTecplot3D`` expects as an
+    ``(nx, ny, nz, ndim)`` array (here ``(nv, nu, 1, 3)``). No NURBS re-evaluation.
+    """
+    coords = DVGeo.update(ptName)
+    npts = nu * nv
+    f = openTecplot(fileName, 3)
+    for ii in range(nSurf):
+        patch = coords[ii * npts : (ii + 1) * npts].reshape(nv, nu, 1, 3)
+        writeTecplot3D(f, f"hull{ii}", patch)
+    closeTecplot(f) 
+
+    # Also write FFD
+    DVGeo.writeTecplot(f"KCS_FFD_{iframe}.dat")
 
 
 def main():
@@ -30,20 +68,19 @@ def main():
     geo = pyGeo(fileName=IGES_FILE, initType="iges")
     geo.doConnectivity()
 
-    # Save the undeformed surface for side-by-side comparison.
-    geo.writeTecplot("KCS_original.dat")
-
     # ------------------------- Set up the FFD ----------------------------- #
     DVGeo = DVGeometry(FFD_FILE)
-
-    # One local shape variable per control point, free to move in the transverse
-    # (y) direction. This drives the beam/fullness of the hull sections.
     DVGeo.addLocalDV("localShape", lower=-3.0, upper=3.0, axis="y", scale=1.0)
 
-    # ----------------- Select the bow control points ---------------------- #
-    # getLocalIndex(0) has shape (nLongitudinal, nTransverse, nVertical); j=0 is
-    # the centreline plane. The local DV array is indexed by global coefficient
-    # id, so a boolean mask over the control points maps straight onto it.
+    # Sample the baseline hull once and embed that point cloud in the
+    # (undeformed) FFD. From here on the cloud is deformed directly by the FFD
+    cloud = sampleHullPointCloud(geo)
+    DVGeo.addPointSet(cloud, "hull")
+
+    # Save the undeformed surface for side-by-side comparison (DVs are still zero).
+    writeDeformedHull(DVGeo, "KCS_original.dat", geo.nSurf)
+
+    # ----------------- Select the bow and stern control points ---------------------- #
     localIndex = DVGeo.getLocalIndex(0)
     coef = DVGeo.FFD.coef
 
@@ -53,8 +90,8 @@ def main():
     bowSelectedFFDs = isForward & isBelowWaterline
     sternFFDs = isAft & isBelowWaterline
 
-    # Never move the centreline (j=0) plane, so the symmetry plane stays at y=0.
-    CLFFDs = localIndex[:, 0, :].flatten()
+    # Never move the centerline points, so the symmetry plane stays at y=0.
+    CLFFDs = localIndex[:, 0:4, :].flatten() # pinning the first 4 FFD control points because this is a cubic spline
     bowSelectedFFDs[CLFFDs] = False
     sternFFDs[CLFFDs] = False
 
@@ -65,7 +102,7 @@ def main():
     shape = DVGeo.getValues()["localShape"].copy()
     DVGeo.setDesignVars({"localShape": shape})
     nframes = 10
-    wave = BULGE_OUTBOARD * np.cos(np.linspace(0, np.pi, nframes))
+    wave = BULGE_OUTBOARD * np.sin(np.linspace(0, 2*np.pi, nframes))
 
     # --- Bow deformation ---
     print("="*30)
@@ -78,14 +115,8 @@ def main():
         DVGeo.setDesignVars({"localShape": shape})
 
         # ----------------------- Write the outputs ---------------------------- #
-        # updatePyGeo embeds each surface's control points, deforms them through the
-        # FFD, and writes the result. Writing both formats from the same object is
-        # safe (the second call reproduces the first to ~1e-13).
-        DVGeo.updatePyGeo(geo, "tecplot", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
-        DVGeo.updatePyGeo(geo, "iges", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
-
-        # Dump the FFD control box together with the embedded (deformed) hull.
-        DVGeo.writeTecplot(f"KCS_ffd_embedded_{iframe}.dat")
+        # Write the FFD-deformed hull as a structured Tecplot surface.
+        writeDeformedHull(DVGeo, f"KCS_pointcloud_{iframe}.dat", geo.nSurf, iframe=iframe)
 
         # Reset DVs
         shape[bowSelectedFFDs] -= bump
@@ -102,14 +133,8 @@ def main():
         DVGeo.setDesignVars({"localShape": shape})
 
         # ----------------------- Write the outputs ---------------------------- #
-        # updatePyGeo embeds each surface's control points, deforms them through the
-        # FFD, and writes the result. Writing both formats from the same object is
-        # safe (the second call reproduces the first to ~1e-13).
-        DVGeo.updatePyGeo(geo, "tecplot", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
-        DVGeo.updatePyGeo(geo, "iges", f"KCS_deformed_{iframe}", nRefU=N_REFINE, nRefV=N_REFINE)
-
-        # Dump the FFD control box together with the embedded (deformed) hull.
-        DVGeo.writeTecplot(f"KCS_ffd_embedded_{iframe}.dat")
+        # Write the FFD-deformed hull as a structured Tecplot surface.
+        writeDeformedHull(DVGeo, f"KCS_pointcloud_{iframe}.dat", geo.nSurf, iframe=iframe)
 
         # Reset DVs
         shape[sternFFDs] -= bump
